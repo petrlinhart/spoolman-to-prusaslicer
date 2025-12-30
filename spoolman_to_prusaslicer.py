@@ -1,4 +1,4 @@
-__version__ = "0.2"
+__version__ = "0.3"
 import requests
 import os
 import re
@@ -30,7 +30,6 @@ def hex_to_color_name(hex_color):
     if not hex_color:
         return "Unknown"
     h = str(hex_color).lower().lstrip("#")
-    # jednoduché heuristiky
     if h.endswith("ff"): 
         return "Blue"
     if h.startswith("ff"):
@@ -72,10 +71,173 @@ COOLING_PROFILE = {
 SOLUBLE_MATERIALS = {"PVA", "BVOH", "HIPS"}
 
 # ==============================
+# ROZŠÍŘENÉ DEFINICE PRO BARVY
+# ==============================
+
+BASIC_COLORS = [
+    "white", "black", "blue", "red", "green",
+    "yellow", "orange", "silver", "gold", "brown",
+    "purple", "pink", "gray", "grey", "cyan",
+    "magenta", "violet", "turquoise", "beige", "cream",
+    "navy", "teal", "maroon", "olive", "coral",
+    "bronze", "copper", "champagne", "ivory", "mint",
+    "lavender", "peach", "salmon", "burgundy", "charcoal",
+    "natural", "transparent", "clear"
+]
+
+# Efekty filamentů (Silk, Galaxy, atd.)
+EFFECTS = [
+    "silk", "galaxy", "pearl", "metallic", "matte", "glossy",
+    "luminous", "glowing", "pure", "sparkle", "glitter",
+    "rainbow", "chameleon", "marble", "wood", "carbon",
+    "glow-in-dark", "glow in the dark", "gitd", "fluorescent",
+    "dual-color", "dual color", "dualcolor", "tri-color", 
+    "tri color", "tricolor", "multi-color", "multicolor",
+    "gradient", "transition", "coextruded"
+]
+
+# Aliasy pro normalizaci názvů barev
+COLOR_ALIASES = {
+    "grey": "gray",
+    "transparent": "clear",
+}
+
+def normalize_color(color):
+    """Normalizuje název barvy (např. grey -> gray)"""
+    return COLOR_ALIASES.get(color.lower(), color)
+
+def extract_color_info(name_raw):
+    """
+    Extrahuje informace o barvě z názvu filamentu.
+    Podporuje:
+    - Jednobarevné: "Red", "Blue"
+    - S efektem: "Silk Red", "Galaxy Blue"  
+    - Dual-color: "Dual-Color Red Green", "Red-Green"
+    - Tri-color: "Tri-Color Red Blue Green"
+    - Kombinace: "Silk Dual-Color Red Green"
+    
+    Vrací tuple: (display_name, short_name)
+    - display_name: plný název pro zobrazení ("Silk Dual Red-Green")
+    - short_name: zkrácený název pro filename ("SilkDual_Red-Green")
+    """
+    name_lower = name_raw.lower()
+    
+    detected_effects = []
+    detected_colors = []
+    is_multicolor = False
+    multicolor_type = None  # "dual", "tri", "multi", "gradient"
+    
+    # 1) Detekce typu vícebarevnosti
+    multicolor_patterns = [
+        (r"dual[- ]?colou?r", "dual"),
+        (r"tri[- ]?colou?r", "tri"),
+        (r"multi[- ]?colou?r", "multi"),
+        (r"gradient", "gradient"),
+        (r"transition", "gradient"),
+        (r"coextruded", "dual"),
+        (r"rainbow", "rainbow"),
+        (r"chameleon", "chameleon"),
+    ]
+    
+    for pattern, mc_type in multicolor_patterns:
+        if re.search(pattern, name_lower):
+            is_multicolor = True
+            multicolor_type = mc_type
+            break
+    
+    # 2) Detekce efektů (Silk, Galaxy, atd.)
+    for effect in EFFECTS:
+        # Přeskočíme multicolor patterny, ty už máme
+        if effect in ["dual-color", "dual color", "dualcolor", 
+                      "tri-color", "tri color", "tricolor",
+                      "multi-color", "multicolor", "gradient", 
+                      "transition", "coextruded", "rainbow", "chameleon"]:
+            continue
+        if re.search(rf"\b{re.escape(effect)}\b", name_lower):
+            detected_effects.append(effect.title())
+    
+    # 3) Detekce barev
+    # Nejdřív zkusíme najít vzory jako "Red Green", "Red-Green", "Red/Green"
+    color_sequence_pattern = r'\b(' + '|'.join(BASIC_COLORS) + r')(?:[\s\-/&]+(' + '|'.join(BASIC_COLORS) + r'))+\b'
+    color_sequences = re.findall(color_sequence_pattern, name_lower)
+    
+    if color_sequences:
+        # Máme sekvenci barev
+        # Najdeme všechny barvy v pořadí
+        all_colors_in_name = re.findall(r'\b(' + '|'.join(BASIC_COLORS) + r')\b', name_lower)
+        # Odstraníme duplikáty při zachování pořadí
+        seen = set()
+        for c in all_colors_in_name:
+            normalized = normalize_color(c)
+            if normalized not in seen:
+                detected_colors.append(normalized.title())
+                seen.add(normalized)
+    else:
+        # Hledáme jednotlivé barvy
+        for base in BASIC_COLORS:
+            if re.search(rf"\b{base}\b", name_lower):
+                normalized = normalize_color(base)
+                if normalized.title() not in detected_colors:
+                    detected_colors.append(normalized.title())
+    
+    # 4) Automatická detekce multicolor pokud máme více barev
+    if len(detected_colors) >= 2 and not is_multicolor:
+        is_multicolor = True
+        if len(detected_colors) == 2:
+            multicolor_type = "dual"
+        elif len(detected_colors) == 3:
+            multicolor_type = "tri"
+        else:
+            multicolor_type = "multi"
+    
+    # 5) Sestavení výsledného názvu
+    parts = []
+    short_parts = []
+    
+    # Efekty
+    if detected_effects:
+        parts.extend(detected_effects)
+        short_parts.append("".join(detected_effects))
+    
+    # Typ vícebarevnosti
+    if is_multicolor and multicolor_type:
+        type_names = {
+            "dual": "Dual",
+            "tri": "Tri", 
+            "multi": "Multi",
+            "gradient": "Gradient",
+            "rainbow": "Rainbow",
+            "chameleon": "Chameleon"
+        }
+        mc_name = type_names.get(multicolor_type, "Multi")
+        parts.append(mc_name)
+        short_parts.append(mc_name)
+    
+    # Barvy
+    if detected_colors:
+        if is_multicolor:
+            color_str = "-".join(detected_colors)
+            parts.append(color_str)
+            short_parts.append(color_str)
+        else:
+            parts.extend(detected_colors)
+            short_parts.extend(detected_colors)
+    
+    # Fallback
+    if not parts:
+        return ("Unknown", "Unknown")
+    
+    display_name = " ".join(parts)
+    short_name = "_".join(short_parts).replace(" ", "")
+    
+    return (display_name, short_name)
+
+# ==============================
 # START
 # ==============================
 
-print("\n=== Spoolman → PrusaSlicer SAFE SYNC ===\n")
+print("\n=== Spoolman → PrusaSlicer SAFE SYNC v0.3 ===")
+print("    (s podporou vícebarevných filamentů)\n")
 
 response = requests.get(SPOOLMAN_URL, timeout=10)
 response.raise_for_status()
@@ -121,60 +283,15 @@ for spool in active_spools:
     comment = safe_ini(filament.get("comment", "") or "")
 
     # ==============================
-    # ✅ BARVA – vylepšené rozpoznání
-    # - nejdřív páruj explicitní fráze (více slov)
-    # - potom hledej základní barvu jako samostatné slovo
-    # - nakonec fallback na HEX
+    # ✅ BARVA – vylepšené rozpoznání s multicolor podporou
     # ==============================
-
-    # ==============================
-    # ✅ BARVA – dynamické rozpoznání efekt + barva (obě pořadí)
-    # ==============================
-
-    name_lower = name_raw.lower()
-
-    BASIC_COLORS = [
-        "white", "black", "blue", "red", "green",
-        "yellow", "orange", "silver", "gold", "brown",
-        "purple", "pink", "gray", "grey"
-    ]
-
-    EFFECTS = [
-        "galaxy", "silk", "pearl", "metallic",
-        "matte", "glossy", "luminous", "glowing", "pure"
-    ]
-
-    color = "Unknown"
-
-    # 1) efekt + barva  (galaxy red)
-    for effect in EFFECTS:
-        for base in BASIC_COLORS:
-            if re.search(rf"\b{effect}\s+{base}\b", name_lower):
-                color = f"{effect.title()} {base.title()}"
-                break
-        if color != "Unknown":
-            break
-
-    # 2) barva + efekt  (red galaxy)
-    if color == "Unknown":
-        for base in BASIC_COLORS:
-            for effect in EFFECTS:
-                if re.search(rf"\b{base}\s+{effect}\b", name_lower):
-                    color = f"{effect.title()} {base.title()}"
-                    break
-            if color != "Unknown":
-                break
-
-    # 3) pouze základní barva
-    if color == "Unknown":
-        for base in BASIC_COLORS:
-            if re.search(rf"\b{base}\b", name_lower):
-                color = base.title()
-                break
-
-    # 4) fallback – HEX heuristika
-    if color == "Unknown":
-        color = hex_to_color_name(hex_color)
+    
+    color_display, color_short = extract_color_info(name_raw)
+    
+    # Fallback na HEX pokud nic nebylo nalezeno
+    if color_display == "Unknown":
+        color_display = hex_to_color_name(hex_color)
+        color_short = color_display.replace(" ", "_")
 
     filament_color = f"#{hex_color.lstrip('#')}" if hex_color else "#808080"
 
@@ -234,24 +351,26 @@ for spool in active_spools:
         f"Remaining:{remaining_weight}g | Used:{used_weight}g | "
         f"Length:{int(remaining_length)}mm | "
         f"Price:{price}Kc | Price/g:{price_per_gram:.4f}Kc | "
-        f"Price/kg:{filament_cost_per_kg:.2f}Kc | Comment:{comment}"
+        f"Price/kg:{filament_cost_per_kg:.2f}Kc | "
+        f"Color:{color_display} | Comment:{comment}"
     )
 
     # ==============================
     # NÁZEV PROFILU
     # ==============================
 
-    profile_name = f"SM_{vendor_safe}_{material}_{color}_ID{sid}"
+    profile_name = f"SM_{vendor_safe}_{material}_{color_short}_ID{sid}"
     safe_name = clean(profile_name)
     filename = f"{safe_name}.ini"
     path = os.path.join(OUTPUT_DIR, filename)
 
     # ==============================
-    # ✅ FINÁLNÍ INI OBSAH – BEZ CHYB
+    # ✅ FINÁLNÍ INI OBSAH
     # ==============================
 
     ini_content = f"""
-# Generated by Spoolman Sync on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+# Generated by Spoolman Sync v{__version__} on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+# Color: {color_display}
 
 bed_temperature = {bed}
 first_layer_bed_temperature = {first_layer_bed}
@@ -286,12 +405,14 @@ inherits = Prusament {material}
             if calc_hash(f.read()) == new_hash:
                 write_file = False
                 if DEBUG:
-                    print(f"ℹ️ Beze změny: {filename}")
+                    print(f"ℹ️  Beze změny: {filename}")
 
     if write_file:
         with open(path, "w", encoding="utf-8") as f:
             f.write(ini_content)
         print(f"✅ Uloženo: {filename}")
+        if DEBUG:
+            print(f"   └─ Barva: {color_display}")
 
 # ==============================
 # MAZÁNÍ ZRUŠENÝCH PROFILŮ
@@ -300,6 +421,40 @@ inherits = Prusament {material}
 for fname, fpath in existing_profiles.items():
     if fname not in used_profiles:
         os.remove(fpath)
-        print(f"🗑 Smazán profil: {fname}")
+        print(f"🗑  Smazán profil: {fname}")
 
 print("\n🔥 HOTOVO – Restartuj PrusaSlicer")
+
+
+# ==============================
+# TEST FUNKCE (pro debug)
+# ==============================
+
+if __name__ == "__main__" and DEBUG:
+    print("\n" + "="*50)
+    print("TEST ROZPOZNÁVÁNÍ BAREV:")
+    print("="*50)
+    
+    test_names = [
+        "ERYONE - Silk PLA Dual-Color Red Green - PLA",
+        "Prusament PLA Galaxy Black",
+        "eSUN Silk PLA Gold",
+        "Polymaker PolyTerra PLA Marble White",
+        "SUNLU Rainbow PLA",
+        "Eryone Tri-Color Blue Red Yellow",
+        "Generic Red-Green Filament",
+        "Silk Dual Red/Blue PLA",
+        "Prusament PETG Orange",
+        "eSUN PLA+ Glow-in-Dark Green",
+        "Bambu Lab PLA Matte Charcoal",
+        "Overture Silk Purple Gold",
+        "TTYT3D Silk Dual-Color Copper Silver",
+        "Geeetech Silk PLA Red",
+    ]
+    
+    for name in test_names:
+        display, short = extract_color_info(name)
+        print(f"  '{name}'")
+        print(f"    → Display: {display}")
+        print(f"    → Short:   {short}")
+        print()
