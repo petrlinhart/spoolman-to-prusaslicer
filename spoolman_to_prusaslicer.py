@@ -1,3 +1,4 @@
+__version__ = "0.2"
 import requests
 import os
 import re
@@ -28,13 +29,20 @@ def safe_ini(text):
 def hex_to_color_name(hex_color):
     if not hex_color:
         return "Unknown"
-    h = hex_color.lower()
-    if h.endswith("ff"): return "Blue"
-    if h.startswith("ff"): return "Red"
-    if "00ff00" in h: return "Green"
-    if "ffff00" in h: return "Yellow"
-    if "000000" in h: return "Black"
-    if "ffffff" in h: return "White"
+    h = str(hex_color).lower().lstrip("#")
+    # jednoduché heuristiky
+    if h.endswith("ff"): 
+        return "Blue"
+    if h.startswith("ff"):
+        return "Red"
+    if "00ff00" in h or h == "00ff00": 
+        return "Green"
+    if "ffff00" in h or h == "ffff00":
+        return "Yellow"
+    if h in ("000000", "00000000"):
+        return "Black"
+    if h in ("ffffff", "ffffff00"):
+        return "White"
     return f"HEX_{h}"
 
 def calc_hash(data):
@@ -77,7 +85,7 @@ active_spools = [s for s in spools if not s.get("archived", False)]
 
 existing_profiles = {}
 for f in os.listdir(OUTPUT_DIR):
-    if f.startswith("Spoolman_") and f.endswith(".ini"):
+    if f.startswith("SM_") and f.endswith(".ini"):
         existing_profiles[f] = os.path.join(OUTPUT_DIR, f)
 
 used_profiles = set()
@@ -87,44 +95,92 @@ used_profiles = set()
 # ==============================
 
 for spool in active_spools:
-    filament = spool.get("filament", {})
+    filament = spool.get("filament", {}) or {}
 
     sid = spool.get("id", "X")
-    name = safe_ini(filament.get("name", ""))
+    name_raw = filament.get("name", "") or ""
+    name = safe_ini(name_raw)
     material = safe_ini(filament.get("material", "PLA")).upper()
     diameter = filament.get("diameter", 1.75)
-    hex_color = filament.get("color_hex", "")
+    hex_color = filament.get("color_hex", "") or ""
 
-    price = filament.get("price", 0.0)
-    density = filament.get("density", 1.24)
+    price = filament.get("price", 0.0) or 0.0
+    density = filament.get("density", 1.24) or 1.24
 
-    filament_weight = filament.get("weight", 0.0)
-    spool_weight = filament.get("spool_weight", 0.0)
+    filament_weight = filament.get("weight", 0.0) or 0.0
+    spool_weight = filament.get("spool_weight", 0.0) or 0.0
 
-    initial_weight = spool.get("initial_weight", 0.0)
-    remaining_weight = spool.get("remaining_weight", 0.0)
-    used_weight = spool.get("used_weight", 0.0)
-    remaining_length = spool.get("remaining_length", 0.0)
+    initial_weight = spool.get("initial_weight", 0.0) or 0.0
+    remaining_weight = spool.get("remaining_weight", 0.0) or 0.0
+    used_weight = spool.get("used_weight", 0.0) or 0.0
+    remaining_length = spool.get("remaining_length", 0.0) or 0.0
 
-    article_number = safe_ini(filament.get("article_number", ""))
-    lot_nr = safe_ini(spool.get("lot_nr", ""))
-    location = safe_ini(spool.get("location", ""))
-    comment = safe_ini(filament.get("comment", ""))
+    article_number = safe_ini(filament.get("article_number", "") or "")
+    lot_nr = safe_ini(spool.get("lot_nr", "") or "")
+    location = safe_ini(spool.get("location", "") or "")
+    comment = safe_ini(filament.get("comment", "") or "")
 
-    # BARVA
+    # ==============================
+    # ✅ BARVA – vylepšené rozpoznání
+    # - nejdřív páruj explicitní fráze (více slov)
+    # - potom hledej základní barvu jako samostatné slovo
+    # - nakonec fallback na HEX
+    # ==============================
+
+    # ==============================
+    # ✅ BARVA – dynamické rozpoznání efekt + barva (obě pořadí)
+    # ==============================
+
+    name_lower = name_raw.lower()
+
+    BASIC_COLORS = [
+        "white", "black", "blue", "red", "green",
+        "yellow", "orange", "silver", "gold", "brown",
+        "purple", "pink", "gray", "grey"
+    ]
+
+    EFFECTS = [
+        "galaxy", "silk", "pearl", "metallic",
+        "matte", "glossy", "luminous", "glowing", "pure"
+    ]
+
     color = "Unknown"
-    for c in ["Black", "White", "Blue", "Red", "Green", "Yellow", "Orange", "Silver", "Gold"]:
-        if c.lower() in name.lower():
-            color = c
+
+    # 1) efekt + barva  (galaxy red)
+    for effect in EFFECTS:
+        for base in BASIC_COLORS:
+            if re.search(rf"\b{effect}\s+{base}\b", name_lower):
+                color = f"{effect.title()} {base.title()}"
+                break
+        if color != "Unknown":
             break
+
+    # 2) barva + efekt  (red galaxy)
+    if color == "Unknown":
+        for base in BASIC_COLORS:
+            for effect in EFFECTS:
+                if re.search(rf"\b{base}\s+{effect}\b", name_lower):
+                    color = f"{effect.title()} {base.title()}"
+                    break
+            if color != "Unknown":
+                break
+
+    # 3) pouze základní barva
+    if color == "Unknown":
+        for base in BASIC_COLORS:
+            if re.search(rf"\b{base}\b", name_lower):
+                color = base.title()
+                break
+
+    # 4) fallback – HEX heuristika
     if color == "Unknown":
         color = hex_to_color_name(hex_color)
 
-    filament_color = f"#{hex_color}" if hex_color else "#808080"
+    filament_color = f"#{hex_color.lstrip('#')}" if hex_color else "#808080"
 
     # TEPLOTY
-    nozzle = max(170, min(filament.get("settings_extruder_temp", 220), 350))
-    bed = max(0, min(filament.get("settings_bed_temp", 60), 120))
+    nozzle = max(170, min(int(filament.get("settings_extruder_temp", 220) or 220), 350))
+    bed = max(0, min(int(filament.get("settings_bed_temp", 60) or 60), 120))
 
     first_layer_nozzle = filament.get(
         "settings_first_layer_extruder_temp",
@@ -143,10 +199,11 @@ for spool in active_spools:
     )
 
     # CHLAZENÍ
-    cooling, min_fan, max_fan = filament.get(
-        "cooling_profile",
-        COOLING_PROFILE.get(material, (1, 50, 100))
-    )
+    cooling_profile_value = filament.get("cooling_profile", None)
+    if cooling_profile_value and isinstance(cooling_profile_value, (list, tuple)) and len(cooling_profile_value) == 3:
+        cooling, min_fan, max_fan = cooling_profile_value
+    else:
+        cooling, min_fan, max_fan = COOLING_PROFILE.get(material, (1, 50, 100))
 
     # ROZPUSTNOST
     filament_soluble = filament.get(
@@ -155,7 +212,7 @@ for spool in active_spools:
     )
 
     # VÝROBCE
-    vendor = safe_ini(filament.get("vendor", {}).get("name", "Spoolman"))
+    vendor = safe_ini((filament.get("vendor") or {}).get("name", "SM"))
     vendor_safe = clean(vendor)
 
     # CENA
@@ -184,7 +241,7 @@ for spool in active_spools:
     # NÁZEV PROFILU
     # ==============================
 
-    profile_name = f"Spoolman_{vendor_safe}_{material}_{color}_ID{sid}"
+    profile_name = f"SM_{vendor_safe}_{material}_{color}_ID{sid}"
     safe_name = clean(profile_name)
     filename = f"{safe_name}.ini"
     path = os.path.join(OUTPUT_DIR, filename)

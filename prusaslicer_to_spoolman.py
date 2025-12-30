@@ -5,23 +5,19 @@ import os
 SPOOLMAN_URL = "http://homeassistant.local:7912/api/v1"
 EXPORT_FILE = "PrusaSlicer_config_bundle.ini"
 
-DEBUG = True
-
 # ==============================
 # Pomocné funkce
 # ==============================
+
+def log(msg):
+    print(msg)
 
 def safe_float(value, name, section):
     try:
         return float(value)
     except:
-        print(f"⚠️ NEMAPOVATELNÉ ČÍSLO: [{section}] {name} = {value}")
+        log(f"⚠️ Nelze převést [{section}] {name} = {value}")
         return None
-
-
-def log(msg):
-    print(msg)
-
 
 # ==============================
 # Načtení exportu
@@ -40,8 +36,12 @@ config.read(EXPORT_FILE, encoding="utf-8")
 
 vendors = {}
 r = requests.get(f"{SPOOLMAN_URL}/vendor")
+if r.status_code != 200:
+    print("❌ Nelze načíst výrobce")
+    raise SystemExit(1)
+
 for v in r.json():
-    vendors[v["name"].lower()] = v["id"]
+    vendors[v["name"].strip().lower()] = v["id"]
 
 # ==============================
 # Načtení existujících filamentů
@@ -49,11 +49,15 @@ for v in r.json():
 
 filaments = {}
 r = requests.get(f"{SPOOLMAN_URL}/filament")
+if r.status_code != 200:
+    print("❌ Nelze načíst filamenty")
+    raise SystemExit(1)
+
 for f in r.json():
-    filaments[f["name"].lower()] = f["id"]
+    filaments[f["name"].strip().lower()] = f["id"]
 
 # ==============================
-# Zpracování filamentů
+# Zpracování USER filamentů
 # ==============================
 
 for section in config.sections():
@@ -64,57 +68,53 @@ for section in config.sections():
     name = section.replace("filament:", "").strip()
     data = config[section]
 
-    log(f"\n➡️ Filament: {name}")
-
     # ==============================
-    # Povinná pole
+    # ❌ IGNORACE SPOOLMAN FILAMENTŮ
     # ==============================
 
-    required = [
-        "filament_type",
-        "filament_density",
-        "filament_diameter",
-        "temperature",
-        "bed_temperature",
-        "filament_vendor"
-    ]
+    if name.lower().startswith("spoolman_"):
+        log(f"⏭ Přeskakuji Spoolman filament: {name}")
+        continue
 
-    missing = [k for k in required if k not in data]
+    # ==============================
+    # POVINNÁ POLE
+    # ==============================
 
-    if missing:
-        log(f"❌ CHYBÍ POVINNÁ POLE: {missing}")
+    if "filament_vendor" not in data:
+        log(f"⚠️ [{name}] chybí filament_vendor – přeskočeno")
+        continue
+
+    if "filament_type" not in data:
+        log(f"⚠️ [{name}] chybí filament_type – přeskočeno")
+        continue
+
+    vendor_name = data["filament_vendor"].strip()
+    if not vendor_name:
+        log(f"⚠️ [{name}] prázdný výrobce – přeskočeno")
         continue
 
     material = data["filament_type"]
-    density = safe_float(data["filament_density"], "filament_density", section)
-    diameter = safe_float(data["filament_diameter"], "filament_diameter", section)
-    nozzle = safe_float(data["temperature"], "temperature", section)
-    bed = safe_float(data["bed_temperature"], "bed_temperature", section)
 
-    vendor_name = data["filament_vendor"].strip()
+    density  = safe_float(data.get("filament_density"), "filament_density", name)
+    diameter = safe_float(data.get("filament_diameter"), "filament_diameter", name)
+    nozzle   = safe_float(data.get("temperature"), "temperature", name)
+    bed      = safe_float(data.get("bed_temperature"), "bed_temperature", name)
+    cost     = safe_float(data.get("filament_cost"), "filament_cost", name)
+    spool_w  = safe_float(data.get("filament_spool_weight"), "filament_spool_weight", name)
 
     color = data.get("filament_colour", "").replace("#", "")
-    cost_per_kg = safe_float(data.get("filament_cost", 0), "filament_cost", section)
-    spool_weight = safe_float(data.get("filament_spool_weight", 0), "filament_spool_weight", section)
 
-    max_vol = safe_float(data.get("filament_max_volumetric_speed", 0), "filament_max_volumetric_speed", section)
-
-    # ==============================
-    # Cena za gram
-    # ==============================
-
-    if cost_per_kg and cost_per_kg > 0:
-        price_per_gram = cost_per_kg / 1000.0
-    else:
-        price_per_gram = 0
+    log(f"\n➡️ Filament: {name}")
+    log(f"   Výrobce: {vendor_name}")
+    log(f"   Materiál: {material}")
 
     # ==============================
-    # Vendor – vytvoření
+    # VÝROBCE – vytvoření pokud chybí
     # ==============================
 
-    vendor_key = vendor_name.lower()
+    vkey = vendor_name.lower()
 
-    if vendor_key not in vendors:
+    if vkey not in vendors:
         log(f"➕ Vytvářím výrobce: {vendor_name}")
 
         r = requests.post(
@@ -123,64 +123,66 @@ for section in config.sections():
         )
 
         if r.status_code != 200:
-            log(f"❌ CHYBA VYTVÁŘENÍ VÝROBCE: {vendor_name}")
+            log(f"❌ Chyba vytvoření výrobce: {vendor_name}")
+            log(r.text)
             continue
 
-        vendor_id = r.json()["id"]
-        vendors[vendor_key] = vendor_id
+        vendors[vkey] = r.json()["id"]
 
-    else:
-        vendor_id = vendors[vendor_key]
+    vendor_id = vendors[vkey]
 
     # ==============================
-    # Filament – vytvoření / update
+    # FILAMENT PAYLOAD
     # ==============================
 
-    filament_payload = {
+    payload = {
         "name": name,
         "material": material,
-        "density": density,
+        "vendor_id": vendor_id,
         "diameter": diameter,
-        "price": cost_per_kg,
-        "spool_weight": spool_weight,
+        "density": density,
+        "price": cost,
+        "spool_weight": spool_w,
         "settings_extruder_temp": nozzle,
         "settings_bed_temp": bed,
-        "vendor_id": vendor_id,
-        "color_hex": color,
-        "extra": {
-            "price_per_gram": price_per_gram,
-            "max_volumetric_speed": max_vol
-        }
+        "color_hex": color
     }
 
-    filament_key = name.lower()
+    fkey = name.lower()
 
-    if filament_key in filaments:
-        filament_id = filaments[filament_key]
+    # ==============================
+    # CREATE / UPDATE
+    # ==============================
+
+    if fkey in filaments:
+        filament_id = filaments[fkey]
+
         r = requests.patch(
             f"{SPOOLMAN_URL}/filament/{filament_id}",
-            json=filament_payload
+            json=payload
         )
 
         if r.status_code == 200:
-            log(f"🔄 Aktualizováno")
+            log("🔄 Aktualizováno")
         else:
-            log(f"❌ Chyba aktualizace")
+            log("❌ Chyba aktualizace")
+            log(r.text)
 
     else:
         r = requests.post(
             f"{SPOOLMAN_URL}/filament",
-            json=filament_payload
+            json=payload
         )
 
         if r.status_code == 200:
-            filaments[filament_key] = r.json()["id"]
-            log(f"✅ Vytvořen nový filament")
+            filaments[fkey] = r.json()["id"]
+            log("✅ Vytvořen nový filament")
         else:
-            log(f"❌ Chyba vytvoření")
+            log("❌ Chyba vytvoření filamentu")
+            log(r.text)
 
 # ==============================
 # Hotovo
 # ==============================
 
-print("\n🔥 IMPORT DOKONČEN")
+print("\n🔥 IMPORT UŽIVATELSKÝCH FILAMENTŮ DOKONČEN")
